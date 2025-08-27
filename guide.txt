@@ -20,3 +20,4 @@ https://hst-api.wialon.com/wialon/ajax.html?svc=exchange/export_json&params={"fi
 
 Для выполнения этих запросов у вашего пользователя должны быть соответствующие права доступа к объектам и функции импорта/экспорта.
 Метод exchange/export_json создает WLP-файл, который затем можно загрузить.
+asda
