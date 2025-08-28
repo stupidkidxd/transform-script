@@ -56,9 +56,10 @@ class WialonSimpleAPI:
         if not self.sid:
             raise Exception("Not logged in")
         
-        # Формируем URL с параметрами
-        params_json = json.dumps(params)
-        url = f'{self.base_url}/wialon/ajax.html?svc={svc}&params={urllib.parse.quote(params_json)}&sid={self.sid}'
+        # Формируем URL с параметрами (правильное кодирование)
+        params_json = json.dumps(params, ensure_ascii=False)
+        params_encoded = urllib.parse.quote(params_json)
+        url = f'{self.base_url}/wialon/ajax.html?svc={svc}&params={params_encoded}&sid={self.sid}'
         
         logger.debug(f"API URL: {url}")
         
@@ -83,23 +84,40 @@ class WialonSimpleAPI:
             raise Exception(f"JSON decode error: {e}")
 
     def search_unit_by_imei(self, imei):
-        """Поиск юнита по IMEI"""
-        search_params = {
-            "itemsType": "avl_unit",
-            "propName": "sys_unique_id",  # Поиск по IMEI
-            "propValueMask": f"*{imei}*",
-            "sortType": "sys_name"
-        }
-        
+        """Поиск юнита по IMEI согласно документации поддержки"""
+        # Правильный формат согласно ответу поддержки
         params = {
+            "spec": {
+                "itemsType": "avl_unit",
+                "propName": "sys_unique_id",  # Поиск по уникальному ID (IMEI)
+                "propValueMask": imei,  # Точное совпадение с IMEI
+                "sortType": "sys_name"
+            },
             "force": 1,
-            "flags": 0x1,  # Basic info
+            "flags": 1,  # Basic info
             "from": 0,
-            "to": 0,
-            "params": json.dumps(search_params)
+            "to": 0
         }
         
         return self.call_api("core/search_items", params)
+
+    def export_unit_data(self, unit_id, filename="unit_export.wlp"):
+        """Экспорт данных юнита в WLP формат"""
+        params = {
+            "fileName": filename,
+            "json": {
+                "units": [{
+                    "id": unit_id,
+                    "props": [
+                        "general", "sensors", "commands", "custom_fields",
+                        "fuel_consumption", "maintenance", "eco_driving",
+                        "profile", "icon", "advanced"
+                    ]
+                }]
+            }
+        }
+        
+        return self.call_api("exchange/export_json", params)
 
     def get_unit_details(self, unit_id):
         """Получение детальной информации о юните"""
@@ -114,21 +132,23 @@ class WialonSimpleTester:
     def __init__(self, root):
         self.root = root
         self.root.title("Wialon Simple Tester")
-        self.root.geometry("900x600")
+        self.root.geometry("1000x700")
         
         self.api = WialonSimpleAPI()
         self.current_data = None
+        self.current_unit_id = None
+        self.current_unit_name = None
         
         self.create_widgets()
         self.auto_login()
         
     def create_widgets(self):
-        """Создание простого интерфейса"""
+        """Создание интерфейса"""
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Search frame
-        search_frame = ttk.Frame(main_frame)
+        search_frame = ttk.LabelFrame(main_frame, text="Поиск устройства по IMEI", padding="5")
         search_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         ttk.Label(search_frame, text="IMEI устройства:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
@@ -137,17 +157,32 @@ class WialonSimpleTester:
         self.search_entry.insert(0, "352093085741501")
         self.search_entry.bind('<Return>', lambda e: self.search_device())
         
+        # Включаем поддержку Ctrl+V
+        self.search_entry.bind('<Control-v>', self.paste_from_clipboard)
+        self.search_entry.bind('<Command-v>', self.paste_from_clipboard)  # Для Mac
+        
         self.search_btn = ttk.Button(search_frame, text="Найти", command=self.search_device)
         self.search_btn.grid(row=0, column=2, padx=5)
+        
+        # Подсказка про Ctrl+V
+        tip_label = ttk.Label(search_frame, text="(Ctrl+V для вставки)", font=('Arial', 8), foreground='gray')
+        tip_label.grid(row=0, column=3, padx=5)
+        
+        # Export frame
+        export_frame = ttk.Frame(main_frame)
+        export_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.export_btn = ttk.Button(export_frame, text="Экспорт в WLP", command=self.export_data)
+        self.export_btn.grid(row=0, column=0, padx=5)
         
         # Status
         self.status_var = tk.StringVar(value="Подготовка...")
         status_label = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_label.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        status_label.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # Notebook
         self.notebook = ttk.Notebook(main_frame)
-        self.notebook.grid(row=2, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
+        self.notebook.grid(row=3, column=0, sticky=(tk.N, tk.S, tk.W, tk.E))
         
         # Raw data tab
         raw_frame = ttk.Frame(self.notebook)
@@ -165,10 +200,38 @@ class WialonSimpleTester:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(2, weight=1)
+        main_frame.rowconfigure(3, weight=1)
         
         # Initial state
-        self.search_btn.config(state='disabled')
+        self.set_ui_state(False)
+        
+    def paste_from_clipboard(self, event=None):
+        """Вставка из буфера обмена с очисткой от лишних символов"""
+        try:
+            # Получаем содержимое буфера обмена
+            clipboard_content = self.root.clipboard_get()
+            
+            # Очищаем от лишних символов (пробелы, переносы и т.д.)
+            cleaned_imei = ''.join(filter(str.isdigit, clipboard_content))
+            
+            if cleaned_imei:
+                # Вставляем очищенный IMEI
+                self.search_entry.delete(0, tk.END)
+                self.search_entry.insert(0, cleaned_imei)
+                
+                # Показываем уведомление о вставке
+                self.status_var.set(f"Вставлен IMEI: {cleaned_imei}")
+                
+            return "break"  # Предотвращаем стандартную обработку
+        except Exception as e:
+            logger.warning(f"Clipboard paste failed: {e}")
+            return "break"
+        
+    def set_ui_state(self, enabled):
+        """Установка состояния UI"""
+        state = "normal" if enabled else "disabled"
+        self.search_btn.config(state=state)
+        self.export_btn.config(state=state)
         
     def auto_login(self):
         """Автоматическая авторизация"""
@@ -179,7 +242,7 @@ class WialonSimpleTester:
             success = self.api.login()
             if success:
                 self.status_var.set("Авторизация успешна! Введите IMEI")
-                self.search_btn.config(state='normal')
+                self.set_ui_state(True)
             else:
                 raise Exception("Авторизация не удалась")
                 
@@ -187,7 +250,6 @@ class WialonSimpleTester:
             error_msg = str(e)
             logger.error(f"Login failed: {error_msg}")
             
-            # Показываем диагностическую информацию
             test_url = f'https://hst-api.wialon.com/wialon/ajax.html?svc=token/login&params={{"token":"{WLN_TOKEN}"}}'
             error_msg += f"\n\nПроверьте ссылку в браузере:\n{test_url}"
             
@@ -201,8 +263,15 @@ class WialonSimpleTester:
             messagebox.showerror("Ошибка", "Введите IMEI устройства")
             return
             
+        # Очищаем IMEI от возможных лишних символов
+        cleaned_imei = ''.join(filter(str.isdigit, imei))
+        if cleaned_imei != imei:
+            self.search_entry.delete(0, tk.END)
+            self.search_entry.insert(0, cleaned_imei)
+            imei = cleaned_imei
+            
         self.status_var.set(f"Поиск устройства: {imei}...")
-        self.search_btn.config(state='disabled')
+        self.set_ui_state(False)
         self.root.update()
         
         try:
@@ -212,15 +281,15 @@ class WialonSimpleTester:
                 raise Exception(f"Устройство с IMEI '{imei}' не найдено")
             
             unit = search_result['items'][0]
-            unit_id = unit['id']
-            unit_name = unit['nm']
+            self.current_unit_id = unit['id']
+            self.current_unit_name = unit['nm']
             
-            self.status_var.set(f"Загрузка данных: {unit_name}...")
-            unit_details = self.api.get_unit_details(unit_id)
+            self.status_var.set(f"Загрузка данных: {self.current_unit_name}...")
+            unit_details = self.api.get_unit_details(self.current_unit_id)
             self.current_data = unit_details
             
             self.display_data(unit_details)
-            self.status_var.set(f"Найдено: {unit_name}")
+            self.status_var.set(f"Найдено: {self.current_unit_name} (ID: {self.current_unit_id})")
             
         except Exception as e:
             error_msg = f"Ошибка поиска: {str(e)}"
@@ -229,7 +298,37 @@ class WialonSimpleTester:
             messagebox.showerror("Ошибка поиска", error_msg)
             
         finally:
-            self.search_btn.config(state='normal')
+            self.set_ui_state(True)
+    
+    def export_data(self):
+        """Экспорт данных в WLP файл"""
+        if not self.current_unit_id:
+            messagebox.showerror("Ошибка", "Сначала найдите устройство")
+            return
+            
+        try:
+            self.status_var.set("Экспорт данных в WLP...")
+            self.set_ui_state(False)
+            self.root.update()
+            
+            filename = f"unit_{self.current_unit_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wlp"
+            export_result = self.api.export_unit_data(self.current_unit_id, filename)
+            
+            self.status_var.set(f"Экспорт завершен: {filename}")
+            messagebox.showinfo("Экспорт", f"Данные успешно экспортированы в файл:\n{filename}")
+            
+            # Показываем результат экспорта
+            self.raw_text.delete(1.0, tk.END)
+            self.raw_text.insert(tk.END, json.dumps(export_result, indent=2, ensure_ascii=False))
+            
+        except Exception as e:
+            error_msg = f"Ошибка экспорта: {str(e)}"
+            logger.error(error_msg)
+            self.status_var.set("Ошибка экспорта")
+            messagebox.showerror("Ошибка экспорта", error_msg)
+            
+        finally:
+            self.set_ui_state(True)
     
     def display_data(self, data):
         """Отображение данных"""
@@ -250,9 +349,9 @@ class WialonSimpleTester:
         """Форматирование данных"""
         try:
             output = []
-            output.append("=" * 60)
-            output.append("ДАННЫЕ УСТРОЙСТВА WIALON")
-            output.append("=" * 60)
+            output.append("=" * 70)
+            output.append(f"ДАННЫЕ УСТРОЙСТВА: {self.current_unit_name}")
+            output.append("=" * 70)
             output.append("")
             
             general = data.get('general', {})
@@ -278,6 +377,7 @@ class WialonSimpleTester:
                 output.append(f"ДАТЧИКИ ({len(sensors)}):")
                 for sensor in sensors:
                     output.append(f"[{sensor.get('id')}] {sensor.get('n')} ({sensor.get('t')})")
+                    output.append(f"   Параметр: {sensor.get('p')}, Ед.изм: {sensor.get('m')}")
                 output.append("")
             
             return "\n".join(output)
