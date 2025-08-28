@@ -159,14 +159,8 @@ class WialonSimpleTester:
         
         # Включаем поддержку Ctrl+V
         self.search_entry.bind('<Control-v>', self.paste_from_clipboard)
-        self.search_entry.bind('<Command-v>', self.paste_from_clipboard)  # Для Mac
-        
         self.search_btn = ttk.Button(search_frame, text="Найти", command=self.search_device)
         self.search_btn.grid(row=0, column=2, padx=5)
-        
-        # Подсказка про Ctrl+V
-        tip_label = ttk.Label(search_frame, text="(Ctrl+V для вставки)", font=('Arial', 8), foreground='gray')
-        tip_label.grid(row=0, column=3, padx=5)
         
         # Export frame
         export_frame = ttk.Frame(main_frame)
