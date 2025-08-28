@@ -1,4 +1,3 @@
-# tester_app.py
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import json
@@ -131,8 +130,8 @@ class WialonSimpleAPI:
 class WialonSimpleTester:
     def __init__(self, root):
         self.root = root
-        self.root.title("Wialon Simple Tester")
-        self.root.geometry("1000x700")
+        self.root.title("Wialon Data Extractor")
+        self.root.geometry("1200x800")
         
         self.api = WialonSimpleAPI()
         self.current_data = None
@@ -159,8 +158,14 @@ class WialonSimpleTester:
         
         # Включаем поддержку Ctrl+V
         self.search_entry.bind('<Control-v>', self.paste_from_clipboard)
+        self.search_entry.bind('<Command-v>', self.paste_from_clipboard)  # Для Mac
+        
         self.search_btn = ttk.Button(search_frame, text="Найти", command=self.search_device)
         self.search_btn.grid(row=0, column=2, padx=5)
+        
+        # Подсказка про Ctrl+V
+        tip_label = ttk.Label(search_frame, text="(Ctrl+V для вставки)", font=('Arial', 8), foreground='gray')
+        tip_label.grid(row=0, column=3, padx=5)
         
         # Export frame
         export_frame = ttk.Frame(main_frame)
@@ -187,7 +192,7 @@ class WialonSimpleTester:
         # Formatted tab
         formatted_frame = ttk.Frame(self.notebook)
         self.notebook.add(formatted_frame, text="Форматированный вид")
-        self.formatted_text = scrolledtext.ScrolledText(formatted_frame, wrap=tk.WORD, font=('Arial', 10))
+        self.formatted_text = scrolledtext.ScrolledText(formatted_frame, wrap=tk.WORD, font=('Courier New', 10))
         self.formatted_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
         # Configure weights
@@ -283,7 +288,14 @@ class WialonSimpleTester:
             self.current_data = unit_details
             
             self.display_data(unit_details)
-            self.status_var.set(f"Найдено: {self.current_unit_name} (ID: {self.current_unit_id})")
+            
+            # Показываем дополнительную информацию в статусе
+            fuel_info = self.get_fuel_sensor_info(unit_details)
+            if fuel_info:
+                current_fuel = self.calculate_current_fuel(fuel_info['current_value'], fuel_info['calibration_table'])
+                self.status_var.set(f"Найдено: {self.current_unit_name} | Топливо: {current_fuel:.1f} л")
+            else:
+                self.status_var.set(f"Найдено: {self.current_unit_name}")
             
         except Exception as e:
             error_msg = f"Ошибка поиска: {str(e)}"
@@ -293,6 +305,181 @@ class WialonSimpleTester:
             
         finally:
             self.set_ui_state(True)
+    
+    def calculate_current_fuel(self, raw_value, calibration_table):
+        """Расчет текущего уровня топлива на основе RAW значения и таблицы тарировки"""
+        try:
+            if not calibration_table or raw_value is None:
+                return 0
+                
+            # Сортируем таблицу по RAW значениям
+            sorted_table = sorted(calibration_table, key=lambda x: x.get('x', 0))
+            
+            # Находим интервал, в который попадает текущее значение
+            for i in range(len(sorted_table) - 1):
+                current_point = sorted_table[i]
+                next_point = sorted_table[i + 1]
+                
+                if current_point.get('x', 0) <= raw_value <= next_point.get('x', 0):
+                    # Линейная интерполяция
+                    x1, y1 = current_point.get('x', 0), current_point.get('a', 0) * current_point.get('x', 0) + current_point.get('b', 0)
+                    x2, y2 = next_point.get('x', 0), next_point.get('a', 0) * next_point.get('x', 0) + next_point.get('b', 0)
+                    
+                    if x2 - x1 == 0:
+                        return y1
+                    
+                    fuel_level = y1 + (y2 - y1) * (raw_value - x1) / (x2 - x1)
+                    return max(0, fuel_level)
+            
+            # Если значение вне диапазона, берем крайнюю точку
+            last_point = sorted_table[-1]
+            return last_point.get('a', 0) * raw_value + last_point.get('b', 0)
+            
+        except Exception as e:
+            logger.error(f"Fuel calculation error: {e}")
+            return 0
+    
+    def get_fuel_sensor_info(self, data):
+        """Получение детальной информации о датчике топлива"""
+        try:
+            item = data.get('item', {})
+            sensors = item.get('sens', {})
+            
+            fuel_info = {}
+            
+            for sensor_id, sensor in sensors.items():
+                if sensor.get('t') == "fuel level":
+                    fuel_info = {
+                        'id': sensor_id,
+                        'name': sensor.get('n', ''),
+                        'parameter': sensor.get('p', ''),
+                        'calibration_table': sensor.get('tbl', []),
+                        'current_value': item.get('prms', {}).get(sensor.get('p', ''), {}).get('v', 0)
+                    }
+                    break
+            
+            return fuel_info
+            
+        except Exception as e:
+            logger.error(f"Error getting fuel sensor info: {e}")
+            return {}
+    
+    def format_data(self, data):
+        """Форматирование данных устройства в читаемый вид"""
+        try:
+            output = []
+            output.append("=" * 80)
+            
+            # Основная информация из item
+            item = data.get('item', {})
+            
+            output.append(f"ДАННЫЕ УСТРОЙСТВА: {item.get('nm', 'N/A')}")
+            output.append("=" * 80)
+            output.append("")
+            
+            # ОСНОВНАЯ ИНФОРМАЦИЯ
+            output.append("📋 ОСНОВНАЯ ИНФОРМАЦИЯ:")
+            output.append(f"   ID: {item.get('id', 'N/A')}")
+            output.append(f"   Название: {item.get('nm', 'N/A')}")
+            output.append(f"   Класс: {item.get('cls', 'N/A')}")
+            output.append(f"   Создан: {datetime.fromtimestamp(item.get('ct', 0)).strftime('%Y-%m-%d %H:%M:%S')}")
+            output.append("")
+            
+            # ИНФОРМАЦИЯ О ПОЛОЖЕНИИ
+            pos = item.get('pos', {})
+            if pos:
+                output.append("📍 ПОЛОЖЕНИЕ:")
+                output.append(f"   Время: {datetime.fromtimestamp(pos.get('t', 0)).strftime('%Y-%m-%d %H:%M:%S')}")
+                output.append(f"   Координаты: {pos.get('y', 'N/A')}, {pos.get('x', 'N/A')}")
+                output.append(f"   Высота: {pos.get('z', 'N/A')} м")
+                output.append(f"   Скорость: {pos.get('s', 'N/A')} км/ч")
+                output.append(f"   Спутники: {pos.get('c', 'N/A')}")
+                output.append("")
+            
+            # ДАТЧИКИ
+            sensors = item.get('sens', {})
+            if sensors:
+                output.append("🔧 ДАТЧИКИ:")
+                for sensor_id, sensor in sensors.items():
+                    sensor_name = sensor.get('n', f'Датчик {sensor_id}')
+                    sensor_type = sensor.get('t', 'N/A')
+                    sensor_param = sensor.get('p', 'N/A')
+                    sensor_unit = sensor.get('m', 'N/A')
+                    
+                    output.append(f"   [{sensor_id}] {sensor_name} ({sensor_type})")
+                    output.append(f"       Параметр: {sensor_param}, Ед.изм: {sensor_unit}")
+                    
+                    # Особый вывод для датчика топлива
+                    if sensor_type == "fuel level":
+                        current_value = item.get('prms', {}).get(sensor_param, {}).get('v', 0)
+                        current_fuel = self.calculate_current_fuel(current_value, sensor.get('tbl', []))
+                        
+                        output.append(f"       ⛽ ТЕКУЩЕЕ ТОПЛИВО: {current_fuel:.1f} л (RAW: {current_value})")
+                        output.append(f"       📊 Таблица тарировки:")
+                        
+                        # Таблица тарировки
+                        tbl = sensor.get('tbl', [])
+                        if tbl:
+                            for i, point in enumerate(tbl[:3]):  # Показываем первые 3 точки
+                                raw = point.get('x', 0)
+                                liters = point.get('a', 0) * raw + point.get('b', 0)
+                                output.append(f"         {raw} → {liters:.1f} л")
+                            if len(tbl) > 3:
+                                output.append(f"         ... и еще {len(tbl) - 3} точек")
+                    
+                    output.append("")
+            
+            # СЧЕТЧИКИ
+            output.append("📊 СЧЕТЧИКИ:")
+            output.append(f"   Пробег: {item.get('cnm', 0):,} км".replace(',', ' '))
+            output.append(f"   Моточасы: {item.get('cneh', 0):.1f} ч")
+            output.append(f"   Расход топлива: {item.get('cfl', 0)} л")
+            output.append("")
+            
+            # SIM-КАРТА И СВЯЗЬ
+            output.append("📱 SIM-КАРТА:")
+            output.append(f"   ICCID: {item.get('prms', {}).get('iccid', {}).get('v', 'N/A')}")
+            output.append(f"   Уровень GSM: {item.get('prms', {}).get('gsm', {}).get('v', 'N/A')}")
+            output.append("")
+            
+            # ПИТАНИЕ
+            output.append("🔋 ПИТАНИЕ:")
+            output.append(f"   Внешнее: {item.get('prms', {}).get('pwr_ext', {}).get('v', 'N/A')} В")
+            output.append(f"   Внутреннее: {item.get('prms', {}).get('pwr_int', {}).get('v', 'N/A')} В")
+            output.append("")
+            
+            # ПОЛЯ (CUSTOM FIELDS)
+            fields = item.get('flds', {})
+            if fields:
+                output.append("🏷️ ПОЛЬЗОВАТЕЛЬСКИЕ ПОЛЯ:")
+                for field_id, field in fields.items():
+                    output.append(f"   {field.get('n', 'N/A')}: {field.get('v', 'N/A')}")
+                output.append("")
+            
+            # СТАТУС
+            output.append("🟢 СТАТУС:")
+            output.append(f"   Активен: {'Да' if item.get('act', 0) == 1 else 'Нет'}")
+            output.append(f"   Сетевое соединение: {'Есть' if item.get('netconn', 0) == 1 else 'Нет'}")
+            
+            return "\n".join(output)
+            
+        except Exception as e:
+            return f"Ошибка форматирования: {e}\n\nRaw data: {json.dumps(data, indent=2, ensure_ascii=False)}"
+    
+    def display_data(self, data):
+        """Отображение данных"""
+        # Raw data
+        self.raw_text.delete(1.0, tk.END)
+        try:
+            raw_json = json.dumps(data, indent=2, ensure_ascii=False)
+            self.raw_text.insert(tk.END, raw_json)
+        except Exception as e:
+            self.raw_text.insert(tk.END, f"Ошибка: {e}")
+        
+        # Formatted data
+        self.formatted_text.delete(1.0, tk.END)
+        formatted = self.format_data(data)
+        self.formatted_text.insert(tk.END, formatted)
     
     def export_data(self):
         """Экспорт данных в WLP файл"""
@@ -323,61 +510,6 @@ class WialonSimpleTester:
             
         finally:
             self.set_ui_state(True)
-    
-    def display_data(self, data):
-        """Отображение данных"""
-        # Raw data
-        self.raw_text.delete(1.0, tk.END)
-        try:
-            raw_json = json.dumps(data, indent=2, ensure_ascii=False)
-            self.raw_text.insert(tk.END, raw_json)
-        except Exception as e:
-            self.raw_text.insert(tk.END, f"Ошибка: {e}")
-        
-        # Formatted data
-        self.formatted_text.delete(1.0, tk.END)
-        formatted = self.format_data(data)
-        self.formatted_text.insert(tk.END, formatted)
-    
-    def format_data(self, data):
-        """Форматирование данных"""
-        try:
-            output = []
-            output.append("=" * 70)
-            output.append(f"ДАННЫЕ УСТРОЙСТВА: {self.current_unit_name}")
-            output.append("=" * 70)
-            output.append("")
-            
-            general = data.get('general', {})
-            output.append("ОСНОВНАЯ ИНФОРМАЦИЯ:")
-            output.append(f"Название: {general.get('n', 'N/A')}")
-            output.append(f"ID: {data.get('mu', 'N/A')}")
-            output.append(f"UID (IMEI): {general.get('uid', 'N/A')}")
-            output.append(f"Телефон: {general.get('ph', 'N/A')}")
-            output.append(f"Оборудование: {general.get('hw', 'N/A')}")
-            output.append("")
-            
-            # Счетчики
-            counters = data.get('counters', {})
-            if counters:
-                output.append("СЧЕТЧИКИ:")
-                for key, value in counters.items():
-                    output.append(f"{key}: {value}")
-                output.append("")
-            
-            # Датчики
-            sensors = data.get('sensors', [])
-            if sensors:
-                output.append(f"ДАТЧИКИ ({len(sensors)}):")
-                for sensor in sensors:
-                    output.append(f"[{sensor.get('id')}] {sensor.get('n')} ({sensor.get('t')})")
-                    output.append(f"   Параметр: {sensor.get('p')}, Ед.изм: {sensor.get('m')}")
-                output.append("")
-            
-            return "\n".join(output)
-            
-        except Exception as e:
-            return f"Ошибка форматирования: {e}"
 
 def main():
     root = tk.Tk()
