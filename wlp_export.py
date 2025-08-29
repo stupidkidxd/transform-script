@@ -7,6 +7,7 @@ import requests
 from datetime import datetime
 import urllib.parse
 import os
+import time
 from config import WLN_TOKEN
 
 # Настройка логирования
@@ -18,7 +19,7 @@ class WialonBatchExporter:
         self.base_url = "https://hst-api.wialon.com"
         self.sid = None
         self.token = WLN_TOKEN
-        self.units = []  # Список найденных объектов
+        self.units = []
 
     def login(self):
         """Авторизация по токену"""
@@ -71,23 +72,22 @@ class WialonBatchExporter:
         except requests.exceptions.RequestException as e:
             raise Exception(f"HTTP request failed: {e}")
 
-    def get_all_units(self):
-        """Получение всех объектов"""
+    def search_units_by_code_api(self, client_code):
+        """Прямой поиск объектов по коду через API"""
         try:
-            # Правильный формат согласно документации Wialon
-            search_params = {
+            spec = {
                 "itemsType": "avl_unit",
-                "propName": "sys_name", 
-                "propValueMask": "*",  # Все объекты
+                "propName": "sys_name",  # Ищем в названиях
+                "propValueMask": f"*code{client_code}*",  # Ищем код в названиях
                 "sortType": "sys_name"
             }
             
             params = {
+                "spec": spec,
                 "force": 1,
-                "flags": 1,  # Basic info
+                "flags": 0x1,  # Basic info
                 "from": 0,
-                "to": 0,
-                "params": json.dumps(search_params)
+                "to": 0
             }
             
             result = self.call_api("core/search_items", params)
@@ -95,57 +95,64 @@ class WialonBatchExporter:
             if not result or 'items' not in result:
                 return []
             
-            return result['items']
+            # Получаем детальную информацию для найденных объектов
+            detailed_units = []
+            for unit in result['items']:
+                unit_id = unit['id']
+                unit_details = self.get_unit_details(unit_id)
+                if unit_details and 'item' in unit_details:
+                    detailed_units.append(unit_details['item'])
+            
+            return detailed_units
             
         except Exception as e:
-            logger.error(f"Get all units failed: {e}")
-            raise Exception(f"Get all units failed: {e}")
+            logger.error(f"API search failed: {e}")
+            return []
 
     def get_unit_details(self, unit_id):
         """Получение детальной информации об объекте"""
-        params = {
-            "id": unit_id,
-            "flags": 0x7FFFFFFF  # Все флаги для получения полной информации
-        }
-        
-        return self.call_api("core/search_item", params)
+        try:
+            params = {
+                "id": unit_id,
+                "flags": 0x1  # Только базовая информация
+            }
+            
+            return self.call_api("core/search_item", params)
+            
+        except Exception as e:
+            logger.warning(f"Failed to get details for unit {unit_id}: {e}")
+            return None
 
-    def filter_units_by_code(self, units, client_code):
-        """Фильтрация объектов по коду клиента"""
-        filtered_units = []
-        
-        for unit in units:
-            try:
-                unit_id = unit['id']
-                self.status_var.set(f"Проверка объекта {unit_id}...")
-                self.root.update()
+    def check_unit_has_code(self, unit_id, client_code):
+        """Проверяет, есть ли у объекта нужный код"""
+        try:
+            unit_details = self.get_unit_details(unit_id)
+            if not unit_details or 'item' not in unit_details:
+                return False
+            
+            item = unit_details['item']
+            fields = item.get('flds', {})
+            
+            # Проверяем поля
+            for field_id, field in fields.items():
+                field_name = field.get('n', '')
+                if field_name and f"code{client_code}" in field_name:
+                    return True
+            
+            # Проверяем название объекта
+            unit_name = item.get('nm', '').lower()
+            if f"code{client_code}" in unit_name:
+                return True
                 
-                unit_details = self.get_unit_details(unit_id)
-                
-                if unit_details and 'item' in unit_details:
-                    item = unit_details['item']
-                    fields = item.get('flds', {})
-                    
-                    # Ищем поле с нужным кодом
-                    for field_id, field in fields.items():
-                        field_name = field.get('n', '')
-                        field_value = field.get('v', '')
-                        
-                        # Проверяем, содержит ли поле искомый код
-                        if field_name and f"code{client_code}" in field_name:
-                            filtered_units.append(item)
-                            break
-                            
-            except Exception as e:
-                logger.warning(f"Error processing unit {unit.get('id')}: {e}")
-                continue
-        
-        return filtered_units
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Error checking unit {unit_id}: {e}")
+            return False
 
     def export_unit_wlp(self, unit_id, unit_name, export_dir):
         """Экспорт объекта в WLP файл"""
         try:
-            # Создаем безопасное имя файла
             safe_name = "".join(c for c in unit_name if c.isalnum() or c in (' ', '.', '_')).rstrip()
             filename = f"{safe_name}_{unit_id}.wlp"
             filepath = os.path.join(export_dir, filename)
@@ -155,18 +162,13 @@ class WialonBatchExporter:
                 "json": {
                     "units": [{
                         "id": unit_id,
-                        "props": [
-                            "general", "sensors", "commands", "custom_fields",
-                            "fuel_consumption", "maintenance", "eco_driving",
-                            "profile", "icon", "advanced"
-                        ]
+                        "props": ["general", "sensors", "custom_fields"]
                     }]
                 }
             }
             
             result = self.call_api("exchange/export_json", params)
             
-            # Сохраняем результат в файл
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             
@@ -180,15 +182,14 @@ class BatchExportApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Wialon Batch Exporter")
-        self.root.geometry("1200x800")
+        self.root.geometry("1000x700")
         
         self.exporter = WialonBatchExporter()
-        self.units = []
-        self.all_units = []  # Все объекты для поиска
+        self.found_units = []
         
         self.create_widgets()
         self.auto_login()
-        
+
     def create_widgets(self):
         """Создание интерфейса"""
         main_frame = ttk.Frame(self.root, padding="10")
@@ -202,55 +203,46 @@ class BatchExportApp:
         self.code_entry = ttk.Entry(input_frame, width=10)
         self.code_entry.grid(row=0, column=1, sticky=tk.W, padx=5)
         
-        self.load_btn = ttk.Button(input_frame, text="Загрузить все объекты", command=self.load_all_units)
-        self.load_btn.grid(row=0, column=2, padx=5)
-        
-        self.search_btn = ttk.Button(input_frame, text="Найти по коду", command=self.search_units)
-        self.search_btn.grid(row=0, column=3, padx=5)
-        
-        # Info label
-        self.info_label = ttk.Label(input_frame, text="Сначала загрузите все объекты", foreground="blue")
-        self.info_label.grid(row=0, column=4, padx=(20, 5))
-        
-        # Progress bar
-        self.progress = ttk.Progressbar(input_frame, mode='indeterminate')
-        self.progress.grid(row=1, column=0, columnspan=5, sticky=(tk.W, tk.E), pady=(5, 0))
+        self.search_btn = ttk.Button(input_frame, text="Найти объекты", command=self.search_units)
+        self.search_btn.grid(row=0, column=2, padx=5)
         
         # Export frame
         export_frame = ttk.Frame(main_frame)
         export_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        self.export_btn = ttk.Button(export_frame, text="Экспортировать все в WLP", command=self.export_all)
+        self.export_btn = ttk.Button(export_frame, text="Экспортировать все", command=self.export_all)
         self.export_btn.grid(row=0, column=0, padx=5)
         
         ttk.Label(export_frame, text="Папка для экспорта:").grid(row=0, column=1, sticky=tk.W, padx=(20, 5))
         self.export_dir = tk.StringVar(value=os.getcwd())
-        ttk.Label(export_frame, textvariable=self.export_dir, width=50).grid(row=0, column=2, sticky=tk.W, padx=5)
+        ttk.Label(export_frame, textvariable=self.export_dir, width=40).grid(row=0, column=2, sticky=tk.W, padx=5)
         
-        ttk.Button(export_frame, text="Выбрать папку", command=self.select_export_dir).grid(row=0, column=3, padx=5)
+        ttk.Button(export_frame, text="Выбрать", command=self.select_export_dir).grid(row=0, column=3, padx=5)
+        
+        # Progress
+        self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
+        self.progress.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # Status
         self.status_var = tk.StringVar(value="Готов к работе")
         status_label = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_label.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
+        status_label.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
         # Results
         results_frame = ttk.LabelFrame(main_frame, text="Найденные объекты", padding="5")
-        results_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        results_frame.grid(row=4, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # Treeview для отображения объектов
-        columns = ("imei", "name", "id", "code_field")
-        self.tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=15)
+        # Treeview
+        columns = ("name", "id", "code_field")
+        self.tree = ttk.Treeview(results_frame, columns=columns, show="headings", height=10)
         
-        self.tree.heading("imei", text="IMEI")
         self.tree.heading("name", text="Название")
         self.tree.heading("id", text="ID")
         self.tree.heading("code_field", text="Поле с кодом")
         
-        self.tree.column("imei", width=150)
-        self.tree.column("name", width=300)
+        self.tree.column("name", width=400)
         self.tree.column("id", width=100)
-        self.tree.column("code_field", width=150)
+        self.tree.column("code_field", width=200)
         
         # Scrollbars
         v_scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=self.tree.yview)
@@ -265,35 +257,34 @@ class BatchExportApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)
+        main_frame.rowconfigure(4, weight=1)
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
         
-        # Initial state
         self.set_ui_state(False)
-        
+
     def set_ui_state(self, enabled):
         """Установка состояния UI"""
         state = "normal" if enabled else "disabled"
-        self.load_btn.config(state=state)
         self.search_btn.config(state=state)
         self.export_btn.config(state=state)
-        
+
     def select_export_dir(self):
         """Выбор папки для экспорта"""
         directory = filedialog.askdirectory(title="Выберите папку для экспорта")
         if directory:
             self.export_dir.set(directory)
-        
+
     def auto_login(self):
         """Автоматическая авторизация"""
         self.status_var.set("Авторизация...")
+        self.progress.start()
         self.root.update()
         
         try:
             success = self.exporter.login()
             if success:
-                self.status_var.set("Авторизация успешна! Загрузите все объекты")
+                self.status_var.set("Авторизация успешна! Введите код клиента")
                 self.set_ui_state(True)
             else:
                 raise Exception("Авторизация не удалась")
@@ -304,36 +295,11 @@ class BatchExportApp:
             self.status_var.set("Ошибка авторизации")
             messagebox.showerror("Ошибка авторизации", error_msg)
             
-    def load_all_units(self):
-        """Загрузка всех объектов"""
-        self.status_var.set("Загрузка всех объектов...")
-        self.set_ui_state(False)
-        self.progress.start()
-        self.root.update()
-        
-        try:
-            self.all_units = self.exporter.get_all_units()
-            count = len(self.all_units)
-            self.status_var.set(f"Загружено объектов: {count}. Введите код для поиска.")
-            self.info_label.config(text=f"Загружено: {count} объектов")
-            messagebox.showinfo("Загрузка завершена", f"Загружено объектов: {count}")
-            
-        except Exception as e:
-            error_msg = f"Ошибка загрузки: {str(e)}"
-            logger.error(error_msg)
-            self.status_var.set("Ошибка загрузки")
-            messagebox.showerror("Ошибка загрузки", error_msg)
-            
         finally:
             self.progress.stop()
-            self.set_ui_state(True)
-    
+
     def search_units(self):
-        """Поиск объектов по коду клиента"""
-        if not self.all_units:
-            messagebox.showerror("Ошибка", "Сначала загрузите все объекты")
-            return
-            
+        """Поиск объектов по коду"""
         client_code = self.code_entry.get().strip()
         if not client_code or len(client_code) != 4 or not client_code.isdigit():
             messagebox.showerror("Ошибка", "Введите 4-значный цифровой код клиента")
@@ -345,25 +311,19 @@ class BatchExportApp:
         self.root.update()
         
         try:
-            # Добавляем ссылку на app в exporter для обновления статуса
-            self.exporter.status_var = self.status_var
-            self.exporter.root = self.root
-            
-            self.units = self.exporter.filter_units_by_code(self.all_units, client_code)
+            # Используем быстрый API поиск
+            self.found_units = self.exporter.search_units_by_code_api(client_code)
             
             # Очищаем treeview
             for item in self.tree.get_children():
                 self.tree.delete(item)
             
             # Заполняем treeview
-            for unit in self.units:
-                # Получаем IMEI из general информации
-                general = unit.get('prp', {})
-                imei = general.get('sys_unique_id', 'N/A')
+            for unit in self.found_units:
                 name = unit.get('nm', 'N/A')
                 unit_id = unit.get('id', 'N/A')
                 
-                # Находим поле с кодом
+                # Ищем поле с кодом
                 code_field = "Не найдено"
                 fields = unit.get('flds', {})
                 for field_id, field in fields.items():
@@ -372,11 +332,11 @@ class BatchExportApp:
                         code_field = field_name
                         break
                 
-                self.tree.insert("", "end", values=(imei, name, unit_id, code_field))
+                self.tree.insert("", "end", values=(name, unit_id, code_field))
             
-            count = len(self.units)
-            self.status_var.set(f"Найдено объектов с кодом {client_code}: {count}")
-            messagebox.showinfo("Результаты поиска", f"Найдено объектов с кодом {client_code}: {count}")
+            count = len(self.found_units)
+            self.status_var.set(f"Найдено объектов: {count}")
+            messagebox.showinfo("Результаты", f"Найдено объектов с кодом {client_code}: {count}")
             
         except Exception as e:
             error_msg = f"Ошибка поиска: {str(e)}"
@@ -387,10 +347,10 @@ class BatchExportApp:
         finally:
             self.progress.stop()
             self.set_ui_state(True)
-    
+
     def export_all(self):
         """Экспорт всех найденных объектов"""
-        if not self.units:
+        if not self.found_units:
             messagebox.showerror("Ошибка", "Сначала найдите объекты")
             return
             
@@ -407,38 +367,39 @@ class BatchExportApp:
         failed_count = 0
         
         try:
-            for i, unit in enumerate(self.units):
+            for i, unit in enumerate(self.found_units):
                 unit_id = unit.get('id')
                 unit_name = unit.get('nm', f'unit_{unit_id}')
                 
-                self.status_var.set(f"Экспорт {i+1}/{len(self.units)}: {unit_name}...")
+                self.status_var.set(f"Экспорт {i+1}/{len(self.found_units)}: {unit_name}")
                 self.root.update()
                 
                 result = self.exporter.export_unit_wlp(unit_id, unit_name, export_dir)
                 if result:
                     success_count += 1
-                    # Обновляем строку в treeview
+                    # Помечаем успех в treeview
                     for item in self.tree.get_children():
-                        if self.tree.item(item, 'values')[2] == str(unit_id):
+                        if self.tree.item(item, 'values')[1] == str(unit_id):
                             self.tree.item(item, tags=('success',))
                             break
                 else:
                     failed_count += 1
                     # Помечаем ошибку в treeview
                     for item in self.tree.get_children():
-                        if self.tree.item(item, 'values')[2] == str(unit_id):
+                        if self.tree.item(item, 'values')[1] == str(unit_id):
                             self.tree.item(item, tags=('error',))
                             break
+                
+                # Небольшая пауза между запросами
+                time.sleep(0.1)
             
-            # Настраиваем теги для цветового выделения
+            # Настраиваем цвета
             self.tree.tag_configure('success', background='#d4edda')
             self.tree.tag_configure('error', background='#f8d7da')
             
             self.status_var.set(f"Экспорт завершен: {success_count} успешно, {failed_count} с ошибками")
-            messagebox.showinfo("Экспорт завершен", 
-                              f"Экспортировано объектов: {success_count}\n"
-                              f"Не удалось экспортировать: {failed_count}\n"
-                              f"Файлы сохранены в: {export_dir}")
+            messagebox.showinfo("Готово", 
+                              f"Успешно: {success_count}\nОшибки: {failed_count}\nПапка: {export_dir}")
             
         except Exception as e:
             error_msg = f"Ошибка экспорта: {str(e)}"
