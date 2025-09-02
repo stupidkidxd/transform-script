@@ -1,3 +1,4 @@
+# batch_export.py
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 import json
@@ -83,62 +84,151 @@ class WialonBatchExporter:
             raise Exception(f"HTTP request failed: {e}")
 
     def get_all_units(self):
-        """Получение всех объектов"""
+        """Получение всех объектов - улучшенная версия"""
         try:
             logger.info("Получение списка всех объектов...")
             
-            # Параметры для поиска всех объектов
-            spec = {
-                "itemsType": "avl_unit",
-                "propName": "",
-                "propValueMask": "*",
-                "sortType": "sys_name"
-            }
+            # Способ 1: Используем core/search_items с пагинацией
+            all_units = []
+            start = 0
+            limit = 1000  # Лимит на запрос
             
-            params = {
-                "spec": spec,
-                "force": 1,
-                "flags": 1,
-                "from": 0,
-                "to": 0
-            }
+            while True:
+                params = {
+                    "spec": {
+                        "itemsType": "avl_unit",
+                        "propName": "",
+                        "propValueMask": "*",
+                        "sortType": "sys_name"
+                    },
+                    "force": 1,
+                    "flags": 0x1,  # Базовые флаги
+                    "from": start,
+                    "to": start + limit - 1
+                }
+                
+                logger.info(f"Запрос объектов с {start} по {start + limit - 1}")
+                result = self.call_api("core/search_items", params)
+                
+                if not result or 'items' not in result or not result['items']:
+                    break
+                
+                units_batch = result['items']
+                all_units.extend(units_batch)
+                
+                logger.info(f"Получено {len(units_batch)} объектов в этой пачке")
+                
+                # Если получили меньше чем лимит, значит это последняя пачка
+                if len(units_batch) < limit:
+                    break
+                
+                start += limit
+                time.sleep(1)  # Пауза между запросами
             
-            result = self.call_api("core/search_items", params)
+            logger.info(f"Всего найдено объектов: {len(all_units)}")
             
-            if not result or 'items' not in result:
-                raise Exception("Не удалось получить список объектов")
+            # Способ 2: Если первый способ не сработал, пробуем альтернативный
+            if not all_units:
+                logger.info("Пробуем альтернативный метод поиска объектов...")
+                
+                # Пробуем получить объекты через другой метод
+                params = {
+                    "spec": {
+                        "itemsType": "avl_unit",
+                        "propName": "sys_name",
+                        "propValueMask": "*",
+                        "sortType": "sys_name"
+                    },
+                    "force": 1,
+                    "flags": 0x1,
+                    "from": 0,
+                    "to": 4999  # Большой лимит
+                }
+                
+                result = self.call_api("core/search_items", params)
+                if result and 'items' in result:
+                    all_units = result['items']
+                    logger.info(f"Альтернативный метод: найдено {len(all_units)} объектов")
             
-            units = result['items']
-            logger.info(f"Найдено объектов: {len(units)}")
+            # Обрабатываем полученные объекты
+            processed_units = []
+            for unit in all_units:
+                try:
+                    unit_id = unit.get('id')
+                    unit_name = unit.get('nm', 'Unknown')
+                    
+                    # Получаем подробную информацию об объекте
+                    unit_details = self.get_unit_details(unit_id)
+                    if unit_details:
+                        imei = self.extract_imei(unit_details)
+                        if imei:
+                            processed_units.append({
+                                'id': unit_id,
+                                'name': unit_name,
+                                'imei': imei,
+                                'details': unit_details
+                            })
+                        else:
+                            logger.warning(f"Не найден IMEI для объекта {unit_name} (ID: {unit_id})")
+                    else:
+                        logger.warning(f"Не удалось получить детали для объекта {unit_name} (ID: {unit_id})")
+                        
+                except Exception as e:
+                    logger.error(f"Ошибка обработки объекта {unit.get('nm', 'Unknown')}: {e}")
+                    continue
             
-            # Фильтруем только активные объекты с IMEI
-            filtered_units = []
-            for unit in units:
-                if unit.get('nm') and unit.get('id'):
-                    # Проверяем наличие IMEI в уникальных идентификаторах
-                    if 'uids' in unit and unit['uids']:
-                        for uid in unit['uids']:
-                            if uid.get('id') and len(uid['id']) >= 15:  # IMEI обычно 15 цифр
-                                filtered_units.append({
-                                    'id': unit['id'],
-                                    'name': unit['nm'],
-                                    'imei': uid['id']
-                                })
-                                break
-                    # Если нет в uids, ищем в других полях
-                    elif 'uid' in unit and unit['uid'] and len(unit['uid']) >= 15:
-                        filtered_units.append({
-                            'id': unit['id'],
-                            'name': unit['nm'],
-                            'imei': unit['uid']
-                        })
-            
-            logger.info(f"Отфильтровано объектов с IMEI: {len(filtered_units)}")
-            return filtered_units
+            logger.info(f"Успешно обработано объектов: {len(processed_units)}")
+            return processed_units
             
         except Exception as e:
             logger.error(f"Get all units failed: {e}")
             return []
+
+    def get_unit_details(self, unit_id):
+        """Получение детальной информации об объекте"""
+        try:
+            params = {
+                "id": unit_id,
+                "flags": 0x1  # Базовые флаги
+            }
+            
+            result = self.call_api("core/search_item", params)
+            return result.get('item') if result else None
+            
+        except Exception as e:
+            logger.warning(f"Не удалось получить детали объекта {unit_id}: {e}")
+            return None
+
+    def extract_imei(self, unit_details):
+        """Извлечение IMEI из данных объекта"""
+        try:
+            # Способ 1: Из уникальных идентификаторов
+            if 'uids' in unit_details and unit_details['uids']:
+                for uid in unit_details['uids']:
+                    if uid.get('id') and len(str(uid['id'])) >= 15:  # IMEI обычно 15 цифр
+                        return str(uid['id'])
+            
+            # Способ 2: Прямое поле uid
+            if 'uid' in unit_details and unit_details['uid'] and len(str(unit_details['uid'])) >= 15:
+                return str(unit_details['uid'])
+            
+            # Способ 3: Из свойств
+            if 'prop' in unit_details and unit_details['prop']:
+                props = unit_details['prop']
+                if 'unique_id' in props and len(str(props['unique_id'])) >= 15:
+                    return str(props['unique_id'])
+            
+            # Способ 4: Из дополнительных полей
+            if '152' in unit_details:  # IMEI часто хранится в поле 152
+                imei_candidate = str(unit_details['152'])
+                if len(imei_candidate) >= 15:
+                    return imei_candidate
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Ошибка извлечения IMEI: {e}")
+            return None
 
     def get_messages_direct(self, unit_id, time_from, time_to):
         """Прямое получение сообщений"""
@@ -152,7 +242,7 @@ class WialonBatchExporter:
                 "timeTo": to_ts,
                 "flags": 1,
                 "flagsMask": 65281,
-                "loadCount": 500000  # Лимит на объект
+                "loadCount": 500000
             }
             
             result = self.call_api("messages/load_interval", params)
@@ -243,6 +333,9 @@ class WialonBatchExporter:
             logger.error(f"Export to ZIP failed: {e}")
             return False
 
+# Класс BatchExportApp остается без изменений (как в предыдущем коде)
+# ... [весь код класса BatchExportApp без изменений]
+
 class BatchExportApp:
     def __init__(self, root):
         self.root = root
@@ -307,6 +400,10 @@ class BatchExportApp:
         self.stop_btn = ttk.Button(control_frame, text="Остановить выгрузку", command=self.stop_batch_export, state="disabled")
         self.stop_btn.grid(row=0, column=1, padx=5)
         
+        # Test button
+        self.test_btn = ttk.Button(control_frame, text="Тест подключения", command=self.test_connection)
+        self.test_btn.grid(row=0, column=2, padx=5)
+        
         # Progress
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate')
         self.progress.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
@@ -347,6 +444,40 @@ class BatchExportApp:
         directory = filedialog.askdirectory(title="Выберите папку для сохранения")
         if directory:
             self.export_dir.set(directory)
+
+    def test_connection(self):
+        """Тестирование подключения и получение объектов"""
+        self.status_var.set("Тестирование подключения...")
+        self.progress.start()
+        
+        def test_thread():
+            try:
+                # Проверяем авторизацию
+                if not self.exporter.sid:
+                    success = self.exporter.login()
+                    if not success:
+                        raise Exception("Ошибка авторизации")
+                
+                # Пробуем получить объекты
+                units = self.exporter.get_all_units()
+                
+                if units:
+                    self.log_message(f"Тест успешен! Найдено объектов: {len(units)}")
+                    self.log_message("Первые 5 объектов:")
+                    for i, unit in enumerate(units[:5]):
+                        self.log_message(f"  {i+1}. {unit['name']} (IMEI: {unit['imei']})")
+                    self.status_var.set(f"Тест успешен! Найдено {len(units)} объектов")
+                else:
+                    self.log_message("Тест: объекты не найдены")
+                    self.status_var.set("Объекты не найдены")
+                    
+            except Exception as e:
+                self.log_message(f"Ошибка теста: {str(e)}")
+                self.status_var.set("Ошибка тестирования")
+            finally:
+                self.progress.stop()
+        
+        threading.Thread(target=test_thread, daemon=True).start()
 
     def auto_login(self):
         """Автоматическая авторизация"""

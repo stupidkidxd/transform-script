@@ -1,4 +1,3 @@
-# messages_export.py
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 import json
@@ -12,7 +11,6 @@ import zipfile
 import io
 from config import WLN_TOKEN
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -47,7 +45,6 @@ class WialonMessagesExporter:
             raise Exception(f"Login failed: {e}")
 
     def call_api(self, svc, params):
-        """Вызов API метода"""
         if not self.sid:
             raise Exception("Not logged in")
         
@@ -57,7 +54,7 @@ class WialonMessagesExporter:
         
         try:
             logger.info(f"API call: {svc} with params: {params}")
-            response = requests.get(url, timeout=300)  # Увеличиваем таймаут для больших запросов
+            response = requests.get(url, timeout=300) 
             response.raise_for_status()
             
             data = response.json()
@@ -118,9 +115,9 @@ class WialonMessagesExporter:
                 "itemId": unit_id,
                 "timeFrom": from_ts,
                 "timeTo": to_ts,
-                "flags": 1,          # Сообщения с позицией
-                "flagsMask": 65281,   # 0xFF01 - для сообщений с данными и позицией
-                "loadCount": 0        # Загрузить все сообщения
+                "flags": 1,
+                "flagsMask": 65281, 
+                "loadCount": 0 
             }
             
             result = self.call_api("messages/load_interval", params)
@@ -129,7 +126,6 @@ class WialonMessagesExporter:
                 logger.warning(f"Нет сообщений за период {time_from} - {time_to}")
                 return None
             
-            # Анализируем структуру ответа
             logger.info(f"Структура ответа: {type(result)}")
             if isinstance(result, dict):
                 logger.info(f"Ключи в ответе: {list(result.keys())}")
@@ -164,7 +160,6 @@ class WialonMessagesExporter:
             if not result:
                 return []
             
-            # Анализируем структуру ответа
             if isinstance(result, dict) and 'messages' in result:
                 return result['messages']
             elif isinstance(result, list):
@@ -185,7 +180,6 @@ class WialonMessagesExporter:
             
             logger.info(f"Прямая загрузка сообщений для unit_id {unit_id}")
             
-            # Пробуем разные комбинации параметров с лимитом 1,000,000 сообщений
             params_list = [
                 {
                     "itemId": unit_id,
@@ -193,7 +187,7 @@ class WialonMessagesExporter:
                     "timeTo": to_ts,
                     "flags": 1,
                     "flagsMask": 65281,
-                    "loadCount": 1000000  # Увеличено до 1,000,000
+                    "loadCount": 1000000
                 },
                 {
                     "itemId": unit_id,
@@ -201,7 +195,7 @@ class WialonMessagesExporter:
                     "timeTo": to_ts,
                     "flags": 0xFFFFFFFF,
                     "flagsMask": 0xFFFFFFFF,
-                    "loadCount": 1000000  # Увеличено до 1,000,000
+                    "loadCount": 1000000
                 },
                 {
                     "itemId": unit_id,
@@ -209,7 +203,7 @@ class WialonMessagesExporter:
                     "timeTo": to_ts,
                     "flags": 0x1,
                     "flagsMask": 0x1,
-                    "loadCount": 1000000  # Увеличено до 1,000,000
+                    "loadCount": 1000000
                 }
             ]
             
@@ -227,11 +221,10 @@ class WialonMessagesExporter:
                             logger.info(f"Успешно получено {len(result)} сообщений")
                             return result
                         elif isinstance(result, dict) and 'count' in result:
-                            # Если есть только счетчик, пробуем получить сообщения
                             count = result['count']
                             logger.info(f"Найдено {count} сообщений, получение...")
                             if count > 0:
-                                messages = self.get_messages(0, min(count, 1000000) - 1)  # Увеличено до 1,000,000
+                                messages = self.get_messages(0, min(count, 1000000) - 1)
                                 return messages
                 except Exception as e:
                     logger.warning(f"Попытка {i+1} не удалась: {e}")
@@ -277,9 +270,9 @@ class WialonMessagesExporter:
             all_messages = []
             batch_size = 5000  # Увеличиваем размер пачки для ускорения
             
-            for i in range(0, min(total_messages, 1000000), batch_size):  # Ограничение 1,000,000
+            for i in range(0, min(total_messages, 1000000), batch_size): 
                 batch_from = i
-                batch_to = min(i + batch_size - 1, total_messages - 1, 1000000 - 1)  # Ограничение 1,000,000
+                batch_to = min(i + batch_size - 1, total_messages - 1, 1000000 - 1)
                 
                 logger.info(f"Получение сообщений с {batch_from} по {batch_to}")
                 
@@ -307,11 +300,9 @@ class WialonMessagesExporter:
             zip_buffer = io.BytesIO()
             
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # 1. Сообщения в формате JSON
                 messages_json = json.dumps(messages, indent=2, ensure_ascii=False, default=str)
                 zipf.writestr('messages.json', messages_json)
                 
-                # 2. Информация об экспорте
                 info_content = f"Экспорт данных Wialon\n"
                 info_content += f"Время создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
                 info_content += f"ID объекта: {unit_info.get('id', 'N/A')}\n"
@@ -320,7 +311,6 @@ class WialonMessagesExporter:
                 info_content += f"Период: {time_from.strftime('%Y-%m-%d')} - {time_to.strftime('%Y-%m-%d')}\n"
                 info_content += f"Количество сообщений: {len(messages)}\n"
                 
-                # Анализ данных
                 if messages:
                     first_msg = messages[0] if isinstance(messages[0], dict) else {}
                     last_msg = messages[-1] if isinstance(messages[-1], dict) else {}
@@ -328,8 +318,7 @@ class WialonMessagesExporter:
                     info_content += f"Последнее сообщение: {datetime.fromtimestamp(last_msg.get('t', 0)).strftime('%Y-%m-%d %H:%M:%S')}\n"
                 
                 zipf.writestr('info.txt', info_content)
-                
-                # 3. CSV с позициями
+
                 csv_content = "Дата,Время,Широта,Долгота,Скорость,Высота,Курс,Спутники\n"
                 position_count = 0
                 
@@ -341,8 +330,7 @@ class WialonMessagesExporter:
                         position_count += 1
                 
                 zipf.writestr('positions.csv', csv_content)
-                
-                # 4. Debug информация
+
                 debug_info = {
                     "export_time": datetime.now().isoformat(),
                     "unit_info": unit_info,
@@ -353,11 +341,10 @@ class WialonMessagesExporter:
                     },
                     "messages_count": len(messages),
                     "positions_count": position_count,
-                    "max_messages_limit": 1000000  # Добавлена информация о лимите
+                    "max_messages_limit": 1000000
                 }
                 zipf.writestr('debug_info.json', json.dumps(debug_info, indent=2))
-            
-            # Сохраняем файл
+
             zip_buffer.seek(0)
             with open(filename, 'wb') as f:
                 f.write(zip_buffer.read())
